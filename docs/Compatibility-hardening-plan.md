@@ -18,6 +18,9 @@ This document tracks small, reviewable repairs that make Obscura's browser surfa
 | CDP input | `fix/cdp-input-event-sequence` / PR #3 | Dispatch mouse events in `mousedown -> mouseup -> click` order. |
 | Update visibility | `feat/cli-update-check` / PR #4 | Add an explicit read-only release check helper. |
 | CDP tests | PR #5 | Cover isolated-world execution context id allocation. |
+| Planning docs | PR #6 | Track compatibility-hardening scope, non-goals, and validation. |
+| Profile tests | PR #7 | Cover obvious Windows/macOS profile surface mismatches. |
+| Validation helper | PR #8 | Add a local script for targeted compatibility repair checks. |
 
 ## Follow-up candidates
 
@@ -39,20 +42,30 @@ Profiles should have tests for obvious mismatches such as Windows User-Agent wit
 
 ## Validation checklist
 
-Run targeted checks first:
+Run the helper from PR #8 for the targeted checks:
+
+```bash
+bash scripts/validate-compatibility-repairs.sh
+```
+
+Or run the commands directly:
 
 ```bash
 cargo test -p obscura-net cookie
 cargo test -p obscura-net client_hints_follow_selected_user_agent
+cargo test -p obscura-net ssrf_tests
 cargo test -p obscura-cdp input
-cargo test -p obscura-cdp isolated_world_context_ids_are_monotonic_and_registered
-cargo check -p obscura-cli
+cargo test -p obscura-cdp isolated_world_context
+cargo test -p obscura-browser profile_consistency
+cargo check -p obscura-cli --bin obscura-check-update
 ```
 
 Then run the full suite before merging dependent branches:
 
 ```bash
 cargo test
+# or, after PR #8 is merged:
+FULL=1 bash scripts/validate-compatibility-repairs.sh
 ```
 
 ## Non-goals
