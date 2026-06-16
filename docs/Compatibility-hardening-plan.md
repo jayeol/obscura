@@ -21,6 +21,7 @@ This document tracks small, reviewable repairs that make Obscura's browser surfa
 | Planning docs | PR #6 | Track compatibility-hardening scope, non-goals, and validation. |
 | Profile tests | PR #7 | Cover obvious Windows/macOS profile surface mismatches. |
 | Validation helper | PR #8 | Add a local script for targeted compatibility repair checks. |
+| PR template | PR #9 | Add a compatibility repair PR template for future scoped changes. |
 
 ## Follow-up candidates
 
@@ -67,6 +68,10 @@ cargo test
 # or, after PR #8 is merged:
 FULL=1 bash scripts/validate-compatibility-repairs.sh
 ```
+
+## Review workflow
+
+Use the compatibility repair template from PR #9 for future changes. It keeps each PR explicit about scope, changed surfaces, validation, and non-goals.
 
 ## Non-goals
 
