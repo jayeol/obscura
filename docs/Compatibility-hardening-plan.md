@@ -22,8 +22,11 @@ This document tracks small, reviewable repairs that make Obscura's browser surfa
 | Profile tests | PR #7 | Cover obvious Windows/macOS profile surface mismatches. |
 | Validation helper | PR #8 | Add a local script for targeted compatibility repair checks. |
 | PR template | PR #9 | Add a compatibility repair PR template for future scoped changes. |
+| Follow-up tracker | PR #10 | Track remaining runtime candidates outside the current small PR series. |
 
 ## Follow-up candidates
+
+The detailed follow-up checklist lives in PR #10 (`docs/Compatibility-hardening-followups.md`) because GitHub Issues are disabled for this repository.
 
 ### JavaScript UA data consistency
 
