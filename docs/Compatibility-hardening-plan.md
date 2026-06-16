@@ -23,6 +23,7 @@ This document tracks small, reviewable repairs that make Obscura's browser surfa
 | Validation helper | PR #8 | Add a local script for targeted compatibility repair checks. |
 | PR template | PR #9 | Add a compatibility repair PR template for future scoped changes. |
 | Follow-up tracker | PR #10 | Track remaining runtime candidates outside the current small PR series. |
+| Manual workflow | PR #11 | Add a manually triggered compatibility repair validation workflow. |
 
 ## Follow-up candidates
 
@@ -50,6 +51,12 @@ Run the helper from PR #8 for the targeted checks:
 
 ```bash
 bash scripts/validate-compatibility-repairs.sh
+```
+
+Or run the manual workflow from PR #11:
+
+```text
+Actions -> Compatibility repairs -> Run workflow
 ```
 
 Or run the commands directly:
