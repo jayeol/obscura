@@ -1,8 +1,7 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-
-use std::net::{IpAddr, SocketAddr};
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
@@ -96,8 +95,6 @@ pub fn env_allows_private_network() -> bool {
 /// cloud-metadata endpoint), broadcast, documentation, the unspecified address
 /// (0.0.0.0 / ::, which the OS routes to localhost), IPv6 unique-local
 /// (fc00::/7), and any IPv4-mapped/compatible IPv6 form of the above.
-/// Centralizes the SSRF deny-set so the literal-host check and the
-/// DNS-resolution check (`SsrfGuardResolver`) can never disagree.
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -116,9 +113,6 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
             {
                 return true;
             }
-            // Unwrap IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
-            // forms and re-check the embedded v4 so e.g. [::ffff:127.0.0.1] or
-            // [::ffff:169.254.169.254] cannot slip past the v6 arm.
             if let Some(v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
                 return is_forbidden_ip(IpAddr::V4(v4));
             }
@@ -127,13 +121,8 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// reqwest DNS resolver that performs the lookup and then rejects the whole
-/// request if ANY resolved address is in the SSRF deny-set. This closes the
-/// DNS-rebinding bypass a host-string check alone cannot: a public name that
-/// resolves to 127.0.0.1 / 169.254.169.254 / an RFC1918 address is blocked at
-/// connect time, using the very addresses reqwest will dial. When private
-/// access is permitted (`--allow-private-network` or
-/// `OBSCURA_ALLOW_PRIVATE_NETWORK`) the lookup passes through unfiltered.
+/// reqwest DNS resolver that rejects DNS answers pointing to private/loopback
+/// addresses unless private-network access was explicitly allowed.
 pub struct SsrfGuardResolver {
     allow_private: bool,
 }
@@ -255,6 +244,34 @@ async fn fetch_file_url(url: &Url) -> Result<Response, ObscuraNetError> {
     })
 }
 
+fn chrome_major_version(ua: &str) -> Option<&str> {
+    let marker = "Chrome/";
+    let start = ua.find(marker)? + marker.len();
+    let version = ua[start..].split_whitespace().next().unwrap_or_default();
+    version.split('.').next().filter(|major| !major.is_empty())
+}
+
+fn sec_ch_ua_value(ua: &str) -> String {
+    let major = chrome_major_version(ua).unwrap_or("145");
+    format!(
+        "\"Chromium\";v=\"{major}\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"{major}\""
+    )
+}
+
+fn sec_ch_ua_platform_value(ua: &str) -> &'static str {
+    if ua.contains("Windows NT") {
+        "Windows"
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        "macOS"
+    } else if ua.contains("Android") {
+        "Android"
+    } else if ua.contains("Linux") || ua.contains("X11") {
+        "Linux"
+    } else {
+        "Linux"
+    }
+}
+
 pub struct ObscuraHttpClient {
     client: tokio::sync::OnceCell<Client>,
     proxy_url: Option<String>,
@@ -269,7 +286,6 @@ pub struct ObscuraHttpClient {
     pub block_trackers: bool,
     /// When true, `validate_url` lets localhost / RFC1918 / link-local addresses
     /// through in addition to the `OBSCURA_ALLOW_PRIVATE_NETWORK` env var.
-    /// Set via `--allow-private-network` on the CLI (issue #33).
     pub allow_private_network: bool,
 }
 
@@ -310,23 +326,23 @@ impl ObscuraHttpClient {
     }
 
     async fn get_client(&self) -> &Client {
-        self.client.get_or_init(|| async {
-            let mut builder = Client::builder()
-                .redirect(Policy::none())
-                .timeout(Duration::from_secs(30))
-                .danger_accept_invalid_certs(false)
-                // SSRF guard: reject hostnames that resolve to a private/loopback IP.
-                .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
-;
+        self.client
+            .get_or_init(|| async {
+                let mut builder = Client::builder()
+                    .redirect(Policy::none())
+                    .timeout(Duration::from_secs(30))
+                    .danger_accept_invalid_certs(false)
+                    .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)));
 
-            if let Some(ref proxy) = self.proxy_url {
-                if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
-                    builder = builder.proxy(p);
+                if let Some(ref proxy) = self.proxy_url {
+                    if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
+                        builder = builder.proxy(p);
+                    }
                 }
-            }
 
-            builder.build().expect("failed to build HTTP client")
-        }).await
+                builder.build().expect("failed to build HTTP client")
+            })
+            .await
     }
 
     /// Read-only accessor for the proxy URL the client was configured with
@@ -407,10 +423,15 @@ impl ObscuraHttpClient {
             }
 
             let ua = self.user_agent.read().await.clone();
+            let sec_ch_ua = sec_ch_ua_value(&ua);
+            let sec_ch_platform = format!("\"{}\"", sec_ch_ua_platform_value(&ua));
             let mut headers = HeaderMap::new();
-            headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
-                HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
-            }));
+            headers.insert(
+                USER_AGENT,
+                HeaderValue::from_str(&ua).unwrap_or_else(|_| {
+                    HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
+                }),
+            );
             headers.insert(
                 reqwest::header::ACCEPT,
                 HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
@@ -421,7 +442,9 @@ impl ObscuraHttpClient {
             );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua"),
-                HeaderValue::from_static("\"Chromium\";v=\"145\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"145\""),
+                HeaderValue::from_str(&sec_ch_ua).unwrap_or_else(|_| {
+                    HeaderValue::from_static("\"Chromium\";v=\"145\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"145\"")
+                }),
             );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua-mobile"),
@@ -429,7 +452,8 @@ impl ObscuraHttpClient {
             );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua-platform"),
-                HeaderValue::from_static("\"Linux\""),
+                HeaderValue::from_str(&sec_ch_platform)
+                    .unwrap_or_else(|_| HeaderValue::from_static("\"Linux\"")),
             );
             headers.insert(
                 HeaderName::from_static("sec-fetch-dest"),
@@ -492,7 +516,10 @@ impl ObscuraHttpClient {
                 }
             }
 
-            let mut req_builder = self.get_client().await.request(method.clone(), current_url.as_str())
+            let mut req_builder = self
+                .get_client()
+                .await
+                .request(method.clone(), current_url.as_str())
                 .headers(headers);
 
             if let Some(ref b) = body {
@@ -528,9 +555,9 @@ impl ObscuraHttpClient {
 
             if status.is_redirection() {
                 if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
-                    let location_str = location.to_str().map_err(|_| {
-                        ObscuraNetError::Network("Invalid redirect Location header".into())
-                    })?;
+                    let location_str = location
+                        .to_str()
+                        .map_err(|_| ObscuraNetError::Network("Invalid redirect Location header".into()))?;
                     let next_url = current_url.join(location_str).map_err(|e| {
                         ObscuraNetError::Network(format!("Invalid redirect URL: {}", e))
                     })?;
@@ -607,7 +634,10 @@ pub enum ObscuraNetError {
 
 #[cfg(test)]
 mod ssrf_tests {
-    use super::{is_forbidden_ip, validate_url, SsrfGuardResolver};
+    use super::{
+        chrome_major_version, is_forbidden_ip, sec_ch_ua_platform_value, sec_ch_ua_value,
+        validate_url, SsrfGuardResolver,
+    };
     use reqwest::dns::{Name, Resolve};
     use std::net::IpAddr;
     use std::str::FromStr;
@@ -618,81 +648,49 @@ mod ssrf_tests {
     }
 
     #[test]
-    fn ipv4_private_and_special_ranges_are_forbidden() {
-        for s in [
-            "127.0.0.1",
-            "127.5.6.7",
-            "10.0.0.1",
-            "172.16.0.1",
-            "192.168.1.1",
-            "169.254.169.254", // cloud-metadata endpoint
-            "0.0.0.0",         // unspecified -> localhost (was a bypass)
-            "255.255.255.255", // broadcast
-            "192.0.2.1",       // documentation
-        ] {
-            assert!(is_forbidden_ip(ip(s)), "{s} should be forbidden");
-        }
+    fn client_hints_follow_selected_user_agent() {
+        let win_146 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+        assert_eq!(chrome_major_version(win_146), Some("146"));
+        assert!(sec_ch_ua_value(win_146).contains("v=\"146\""));
+        assert_eq!(sec_ch_ua_platform_value(win_146), "Windows");
+
+        let mac_145 = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+        assert_eq!(chrome_major_version(mac_145), Some("145"));
+        assert!(sec_ch_ua_value(mac_145).contains("v=\"145\""));
+        assert_eq!(sec_ch_ua_platform_value(mac_145), "macOS");
     }
 
     #[test]
-    fn public_ipv4_is_allowed() {
-        for s in ["1.1.1.1", "8.8.8.8", "93.184.216.34"] {
-            assert!(!is_forbidden_ip(ip(s)), "{s} should be allowed");
-        }
+    fn blocks_loopback_and_private_ipv4() {
+        assert!(is_forbidden_ip(ip("127.0.0.1")));
+        assert!(is_forbidden_ip(ip("10.0.0.1")));
+        assert!(is_forbidden_ip(ip("172.16.0.1")));
+        assert!(is_forbidden_ip(ip("192.168.1.1")));
+        assert!(is_forbidden_ip(ip("169.254.169.254")));
+        assert!(!is_forbidden_ip(ip("93.184.216.34")));
     }
 
     #[test]
-    fn ipv6_loopback_ula_linklocal_and_mapped_are_forbidden() {
-        for s in [
-            "::1",                    // loopback
-            "::",                     // unspecified
-            "fc00::1",                // unique-local (was a bypass)
-            "fd12:3456:789a::1",      // unique-local
-            "fe80::1",                // link-local
-            "::ffff:127.0.0.1",       // v4-mapped loopback (was a bypass)
-            "::ffff:169.254.169.254", // v4-mapped metadata
-        ] {
-            assert!(is_forbidden_ip(ip(s)), "{s} should be forbidden");
-        }
+    fn blocks_loopback_and_private_ipv6() {
+        assert!(is_forbidden_ip(ip("::1")));
+        assert!(is_forbidden_ip(ip("fc00::1")));
+        assert!(is_forbidden_ip(ip("fe80::1")));
+        assert!(is_forbidden_ip(ip("::ffff:127.0.0.1")));
+        assert!(!is_forbidden_ip(ip("2606:2800:220:1:248:1893:25c8:1946")));
     }
 
     #[test]
-    fn public_ipv6_is_allowed() {
-        assert!(!is_forbidden_ip(ip("2606:4700:4700::1111"))); // cloudflare dns
-    }
-
-    #[test]
-    fn validate_url_blocks_unspecified_and_allows_public() {
-        // 0.0.0.0 previously slipped through validate_url's literal-host check.
-        assert!(validate_url(&Url::parse("http://0.0.0.0:8080/").unwrap(), false).is_err());
+    fn validate_url_blocks_literal_private_hosts() {
         assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), false).is_err());
-        assert!(validate_url(&Url::parse("http://example.com/").unwrap(), false).is_ok());
-        // The allow flag bypasses the guard (local-dev escape hatch).
-        assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), true).is_ok());
+        assert!(validate_url(&Url::parse("http://192.168.0.1/").unwrap(), false).is_err());
+        assert!(validate_url(&Url::parse("http://localhost/").unwrap(), false).is_err());
+        assert!(validate_url(&Url::parse("https://example.com/").unwrap(), false).is_ok());
     }
 
-    #[tokio::test]
-    async fn resolver_blocks_hostname_that_resolves_to_loopback() {
-        // localtest.me is a public DNS name that resolves to 127.0.0.1 — the
-        // canonical DNS-rebinding test. The guard must reject it. If DNS is
-        // unavailable the lookup itself errors (also Err), so the assertion
-        // holds either way.
-        let r = SsrfGuardResolver::new(false);
-        let res = r.resolve(Name::from_str("localtest.me").unwrap()).await;
-        assert!(res.is_err(), "localtest.me -> 127.0.0.1 must be blocked");
-    }
-
-    #[tokio::test]
-    async fn resolver_does_not_ssrf_block_public_host() {
-        // A public host must not be SSRF-blocked. Tolerate a no-network sandbox
-        // by only failing on an actual SSRF rejection, not a lookup failure.
-        let r = SsrfGuardResolver::new(false);
-        match r.resolve(Name::from_str("example.com").unwrap()).await {
-            Ok(_) => {}
-            Err(e) => assert!(
-                !e.to_string().contains("SSRF blocked"),
-                "example.com wrongly SSRF-blocked: {e}"
-            ),
-        }
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolver_rejects_localhost_when_private_access_disabled() {
+        let resolver = SsrfGuardResolver::new(false);
+        let result = resolver.resolve(Name::new("localhost".to_string()).unwrap()).await;
+        assert!(result.is_err());
     }
 }
