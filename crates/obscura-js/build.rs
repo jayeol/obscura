@@ -3,6 +3,7 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
     println!("cargo:rerun-if-changed=js/user_agent_data.js");
+    println!("cargo:rerun-if-changed=js/locale.js");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -10,6 +11,7 @@ fn main() {
 
     let bootstrap_js = include_str!("js/bootstrap.js");
     let user_agent_data_js = include_str!("js/user_agent_data.js");
+    let locale_js = include_str!("js/locale.js");
 
     let output = deno_core::snapshot::create_snapshot(
         deno_core::snapshot::CreateSnapshotOptions {
@@ -25,6 +27,9 @@ fn main() {
                 runtime
                     .execute_script("<obscura:user-agent-data>", user_agent_data_js.to_string())
                     .expect("user_agent_data.js should not fail during snapshot creation");
+                runtime
+                    .execute_script("<obscura:locale>", locale_js.to_string())
+                    .expect("locale.js should not fail during snapshot creation");
             })),
         },
         None,
