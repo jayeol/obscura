@@ -1,0 +1,84 @@
+name: Compatibility repairs
+
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full workspace test suite after targeted checks"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    name: Targeted validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Cookie compatibility tests
+        run: cargo test -p obscura-net cookie
+
+      - name: HTTP client hint tests when available
+        run: |
+          if grep -R "client_hints_follow_selected_user_agent" -n crates/obscura-net/src >/dev/null 2>&1; then
+            cargo test -p obscura-net client_hints_follow_selected_user_agent
+          else
+            echo "client-hint targeted test is not present on this branch; skipping"
+          fi
+
+      - name: SSRF guard tests
+        run: cargo test -p obscura-net ssrf_tests
+
+      - name: CDP input tests
+        run: cargo test -p obscura-cdp input
+
+      - name: CDP isolated world tests when available
+        run: |
+          if [ -f crates/obscura-cdp/tests/isolated_world_context.rs ]; then
+            cargo test -p obscura-cdp isolated_world_context
+          else
+            echo "isolated-world integration test is not present on this branch; skipping"
+          fi
+
+      - name: Browser profile consistency tests when available
+        run: |
+          if [ -f crates/obscura-browser/tests/profile_consistency.rs ]; then
+            cargo test -p obscura-browser profile_consistency
+          else
+            echo "profile consistency integration test is not present on this branch; skipping"
+          fi
+
+      - name: CLI update helper check when available
+        run: |
+          if [ -f crates/obscura-cli/src/check_update.rs ]; then
+            cargo check -p obscura-cli --bin obscura-check-update
+          else
+            echo "obscura-check-update helper is not present on this branch; skipping"
+          fi
+
+      - name: Full workspace tests
+        if: ${{ inputs.full == 'true' }}
+        run: cargo test
