@@ -14,7 +14,7 @@ pub async fn handle(
             let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let _button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-            let _click_count = params.get("clickCount").and_then(|v| v.as_u64()).unwrap_or(1);
+            let click_count = params.get("clickCount").and_then(|v| v.as_u64()).unwrap_or(1);
 
             if event_type == "mousePressed" {
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
@@ -23,38 +23,13 @@ pub async fn handle(
                             var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__obscura_click_target || document.activeElement || document.body;\
                             if (!target) return;\
                             globalThis.__obscura_click_target = target;\
-                            var evt = new MouseEvent('mousedown', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0}});\
+                            globalThis.__obscura_mouse_down_target = target;\
+                            var evt = new MouseEvent('mousedown', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0,buttons:1}});\
                             target.dispatchEvent(evt);\
-                            var click = new MouseEvent('click', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0}});\
-                            var cancelled = !target.dispatchEvent(click);\
-                            if (!cancelled) {{\
-                                var link = target.closest ? target.closest('a[href]') : null;\
-                                if (!link && target.tagName === 'A' && target.getAttribute('href')) link = target;\
-                                if (link) {{\
-                                    var href = link.getAttribute('href');\
-                                    if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {{\
-                                        location.assign(href);\
-                                    }}\
-                                }} else {{\
-                                    var tag = target.tagName;\
-                                    var type = (target.getAttribute && target.getAttribute('type') || '').toLowerCase();\
-                                    if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {{\
-                                        var form = target.closest ? target.closest('form') : null;\
-                                        if (form && typeof form.submit === 'function') {{ try {{ form.submit(target); }} catch(e) {{}} }}\
-                                    }} else if (tag === 'INPUT' && (type === 'submit' || type === 'image')) {{\
-                                        var form2 = target.closest ? target.closest('form') : null;\
-                                        if (form2 && typeof form2.submit === 'function') {{ try {{ form2.submit(target); }} catch(e) {{}} }}\
-                                    }} else if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {{\
-                                        target.checked = !target.checked;\
-                                        try {{ target.dispatchEvent(new Event('change', {{bubbles:true}})); }} catch(e) {{}}\
-                                    }}\
-                                }}\
-                            }}\
                         }})()",
                         x = x, y = y,
                     );
                     page.evaluate(&code);
-                    page.process_pending_navigation().await.map_err(|e| e.to_string())?;
                 }
             } else if event_type == "mouseReleased" {
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
@@ -62,12 +37,41 @@ pub async fn handle(
                         "(function() {{\
                             var target = (document.elementFromPoint && document.elementFromPoint({x},{y})) || globalThis.__obscura_click_target || document.activeElement || document.body;\
                             if (!target) return;\
-                            var evt = new MouseEvent('mouseup', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0}});\
+                            var evt = new MouseEvent('mouseup', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0,buttons:0}});\
                             target.dispatchEvent(evt);\
+                            var clickTarget = globalThis.__obscura_mouse_down_target || target;\
+                            globalThis.__obscura_mouse_down_target = null;\
+                            if (!clickTarget) return;\
+                            var click = new MouseEvent('click', {{bubbles:true,cancelable:true,clientX:{x},clientY:{y},button:0,buttons:0,detail:{click_count}}});\
+                            var cancelled = !clickTarget.dispatchEvent(click);\
+                            if (!cancelled) {{\
+                                var link = clickTarget.closest ? clickTarget.closest('a[href]') : null;\
+                                if (!link && clickTarget.tagName === 'A' && clickTarget.getAttribute('href')) link = clickTarget;\
+                                if (link) {{\
+                                    var href = link.getAttribute('href');\
+                                    if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {{\
+                                        location.assign(href);\
+                                    }}\
+                                }} else {{\
+                                    var tag = clickTarget.tagName;\
+                                    var type = (clickTarget.getAttribute && clickTarget.getAttribute('type') || '').toLowerCase();\
+                                    if (tag === 'BUTTON' && type !== 'button' && type !== 'reset') {{\
+                                        var form = clickTarget.closest ? clickTarget.closest('form') : null;\
+                                        if (form && typeof form.submit === 'function') {{ try {{ form.submit(clickTarget); }} catch(e) {{}} }}\
+                                    }} else if (tag === 'INPUT' && (type === 'submit' || type === 'image')) {{\
+                                        var form2 = clickTarget.closest ? clickTarget.closest('form') : null;\
+                                        if (form2 && typeof form2.submit === 'function') {{ try {{ form2.submit(clickTarget); }} catch(e) {{}} }}\
+                                    }} else if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {{\
+                                        clickTarget.checked = !clickTarget.checked;\
+                                        try {{ clickTarget.dispatchEvent(new Event('change', {{bubbles:true}})); }} catch(e) {{}}\
+                                    }}\
+                                }}\
+                            }}\
                         }})()",
-                        x = x, y = y,
+                        x = x, y = y, click_count = click_count,
                     );
                     page.evaluate(&code);
+                    page.process_pending_navigation().await.map_err(|e| e.to_string())?;
                 }
             }
 
@@ -88,8 +92,8 @@ pub async fn handle(
                                 var evt = new KeyboardEvent('keydown', {{bubbles:true,cancelable:true,key:'{key}',code:'{code}'}});\
                                 target.dispatchEvent(evt);\
                             }})()",
-                            key = key.replace('\'', "\\'"),
-                            code = code.replace('\'', "\\'"),
+                            key = key.replace('\\', "\\\\").replace('\'', "\\'"),
+                            code = code.replace('\\', "\\\\").replace('\'', "\\'"),
                         );
                         page.evaluate(&js);
 
@@ -148,8 +152,8 @@ pub async fn handle(
                                 var evt = new KeyboardEvent('keyup', {{bubbles:true,key:'{key}',code:'{code}'}});\
                                 target.dispatchEvent(evt);\
                             }})()",
-                            key = key.replace('\'', "\\'"),
-                            code = code.replace('\'', "\\'"),
+                            key = key.replace('\\', "\\\\").replace('\'', "\\'"),
+                            code = code.replace('\\', "\\\\").replace('\'', "\\'"),
                         );
                         page.evaluate(&js);
                     }
@@ -163,7 +167,7 @@ pub async fn handle(
                                         target.dispatchEvent(new Event('input', {{bubbles:true}}));\
                                     }}\
                                 }})()",
-                                text = text.replace('\'', "\\'").replace('\\', "\\\\"),
+                                text = text.replace('\\', "\\\\").replace('\'', "\\'"),
                             );
                             page.evaluate(&js);
                         }
